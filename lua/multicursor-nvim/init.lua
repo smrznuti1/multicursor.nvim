@@ -8,11 +8,11 @@ local function defaultHl(name, opts)
     vim.api.nvim_set_hl(0, name, opts)
 end
 
-defaultHl("MultiCursorCursor", { reverse = true })
+defaultHl("MultiCursorCursor", { link = "Cursor" })
 defaultHl("MultiCursorVisual", { link = "Visual" })
 defaultHl("MultiCursorSign", { link = "SignColumn" })
 defaultHl("MultiCursorMatchPreview", { link = "Search" })
-defaultHl("MultiCursorDisabledCursor", { reverse = true })
+defaultHl("MultiCursorDisabledCursor", { link = "Visual" })
 defaultHl("MultiCursorDisabledVisual", { link = "Visual" })
 defaultHl("MultiCursorDisabledSign", { link = "SignColumn" })
 
