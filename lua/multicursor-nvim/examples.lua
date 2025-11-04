@@ -3,12 +3,12 @@ local tbl = require("multicursor-nvim.tbl")
 local util = require("multicursor-nvim.util")
 local TERM_CODES = require("multicursor-nvim.term-codes")
 
-local setOpfunc = vim.fn[vim.api.nvim_exec([[
+local setOpfunc = vim.fn[vim.api.nvim_exec2([[
   func s:setOpfunc(val)
     let &opfunc = a:val
   endfunc
   echon get(function('s:setOpfunc'), 'name')
-]], true)]
+]], { output = true }).output]
 
 
 -- All of the default actions like match, select, transpose
@@ -20,59 +20,75 @@ local setOpfunc = vim.fn[vim.api.nvim_exec([[
 -- If you feel like something is missing from the api then
 -- please open an issue.
 
+--- @class mc.Range
+--- @field startRow integer
+--- @field startCol integer
+--- @field endRow integer
+--- @field endCol integer
+
 local examples = {}
 
+--- Interactively ask for a regex separator, split every visual selections
+--- with the regex separator.
+--- To be used in visual/select mode only.
+---
+--- For example, visually selecting "ab,cd,ef,gh" and splitting with "," will
+--- create four cursors, each selecting a group of letters.
 function examples.splitCursors(pattern)
     mc.action(function(ctx)
         pattern = pattern or vim.fn.input("Split: ")
         if not pattern or pattern == "" then
             return
         end
-        --- @type Cursor[]
-        local newCursors = {}
+        local exclusive = vim.o.selection == "exclusive"
         ctx:forEachCursor(function(cursor)
-            for _, newCursor in ipairs(cursor:splitVisualLines()) do
-                newCursors[#newCursors + 1] = newCursor
-            end
-        end)
-        --- @param cursor Cursor
-        local function pushCursor(cursor, startCol, endCol)
-            local newCursor = cursor:clone()
-            local pos = cursor:getPos()
-            local vs = cursor:getVisual()
-            local col = vs[2]
-            newCursor:setVisual(
-                { pos[1], col + startCol },
-                { pos[1], col + endCol }
-            )
-        end
-        for _, cursor in ipairs(newCursors) do
-            local selection = cursor:getVisualLines()
-            local matches = util.matchlist(selection, pattern, {
+            local visualLines = cursor:getVisualLines()
+            local matches = util.matchlist(visualLines, pattern, {
                 userConfig = true,
             })
-            local nextIdx = 0
+            if #matches == 0 then
+                return
+            end
+            local vs, ve = cursor:getVisual()
+            if cursor:mode() == "V" or cursor:mode() == "S" then
+                vs[2] = 1
+                ve[2] = vim.fn.col({ ve[1], "$" })
+            end
+            local last = vs
+            cursor:setMode("v")
             for _, match in ipairs(matches) do
-                if match.byteidx ~= nextIdx then
-                    pushCursor(cursor, nextIdx, match.byteidx - 1)
-                end
-                nextIdx = match.byteidx + #match.text
+                local lines = vim.split(match.text, "\n", { plain = true })
+                local startPos = {
+                    vs[1] + match.idx,
+                    (match.idx == 0 and vs[2] or 1) + match.byteidx
+                        - (exclusive and 0 or 1),
+                }
+                local endPos = {
+                    vs[1] + match.idx + #lines - 1,
+                    (match.idx == 0 and vs[2] or 1)
+                        + match.byteidx + #lines[#lines],
+                }
+                cursor:clone():setVisual(last, startPos)
+                last = endPos
             end
-            if nextIdx < #selection[1] then
-                pushCursor(cursor, nextIdx, #selection[1] - 1)
-            end
-            cursor:delete()
-        end
+            cursor:setVisual(last, ve)
+        end)
     end)
 end
 
+--- Interactively ask for a pattern, add a cursor for each match of this
+--- pattern over every visual selections.
+--- To be used in visual/select mode only.
+---
+--- For example, visually selecting "foo bar foo" and matching with "foo" will
+--- create two cursors, one on each "foo".
 function examples.matchCursors(pattern)
     mc.action(function(ctx)
         pattern = pattern or vim.fn.input("Match: ")
         if not pattern or pattern == "" then
             return
         end
-        --- @type Cursor[]
+        --- @type mc.Cursor[]
         local newCursors = {}
         ctx:forEachCursor(function(cursor)
             if cursor:hasSelection() then
@@ -90,38 +106,43 @@ function examples.matchCursors(pattern)
             })
             local vs = cursor:getVisual()
             for _, match in ipairs(matches) do
-                if #match.text > 0 then
-                    local newCursor = cursor:clone()
-                    newCursor:setVisual(
-                        { vs[1], vs[2] + match.byteidx + #match.text - 1 },
-                        { vs[1], vs[2] + match.byteidx }
-                    )
-                    newCursor:setMode("n")
-                end
+                local newCursor = cursor:clone()
+                newCursor:setMode("v")
+                newCursor:setVisual(
+                    { vs[1], vs[2] + match.byteidx },
+                    { vs[1], vs[2] + match.byteidx
+                        + math.max(0, #match.text - 1) }
+                )
             end
             cursor:delete()
         end
     end)
 end
 
+--- Rotate the contents of each visual selection for each cursor.
 --- @param direction -1 | 1
 function examples.transposeCursors(direction)
     mc.action(function(ctx)
-        ctx:forEachCursor(function(cursor)
-            cursor:splitVisualLines()
-        end)
         local cursors = ctx:getCursors()
+        if #cursors <= 1 then
+            return
+        end
         local values = tbl.map(cursors, function(cursor)
-            return cursor:getVisualLines()[1]
+            return table.concat(cursor:getVisualLines(), "\n")
         end)
         for i, cursor in ipairs(cursors) do
             local idx = ((i - direction - 1) % #values) + 1
-            cursor:feedkeys('"_c' .. values[idx] .. TERM_CODES.ESC .. "v`<o")
+            vim.g.MulticursorRegister = values[idx]
+            cursor:feedkeys('"=MulticursorRegister'
+                .. TERM_CODES.CR .. 'P`[v`]', { silent = true })
         end
+        vim.g.MulticursorRegister = nil
         ctx:seekCursor(ctx:mainCursor():getPos(), direction, true):select()
     end)
 end
 
+--- Swaps the visual selection of the current cursor with that of the
+--- next/previous cursor, specified by `direction`.
 --- @param direction -1 | 1
 --- @param wrap? boolean
 function examples.swapCursors(direction, wrap)
@@ -139,6 +160,7 @@ function examples.swapCursors(direction, wrap)
     end)
 end
 
+--- Align columns of cursors on multiple lines.
 function examples.alignCursors()
     mc.action(function(ctx)
         local startLine = ctx:firstCursor():line()
@@ -204,8 +226,8 @@ function examples.alignCursors()
     end)
 end
 
---- @param ctx CursorContext
---- @param motion? string | fun(cursor: Cursor)
+--- @param ctx mc.CursorContext
+--- @param motion? string | fun(cursor: mc.Cursor)
 local function addCursor(ctx, motion, opts)
     opts = opts or {}
     if opts.remap == nil then
@@ -236,6 +258,11 @@ local function addCursor(ctx, motion, opts)
         local startCol = vs[2] + colDiff
         local endRow = ve[1] + rowDiff
         local endCol = ve[2] + colDiff
+        local lastLine = vim.fn.line("$")
+        if endRow > lastLine then
+            endRow = lastLine
+            endCol = vim.fn.col({lastLine, "$"})
+        end
         if oldMode == "V" or oldMode == "S" then
             startCol = vs[2]
             endCol = ve[2]
@@ -263,7 +290,9 @@ local function addCursor(ctx, motion, opts)
     end
 end
 
---- @param motion? string | fun(cursor: Cursor)
+--- Add a cursor and move only the main cursor using motion.
+---
+--- @param motion? string | fun(cursor: mc.Cursor)
 --- @param opts? { remap?: boolean }
 function examples.addCursor(motion, opts)
     mc.action(function(ctx)
@@ -274,7 +303,9 @@ function examples.addCursor(motion, opts)
     end)
 end
 
---- @param motion string | fun(cursor: Cursor)
+--- Move only the main cursor using motion.
+---
+--- @param motion string | fun(cursor: mc.Cursor)
 --- @param opts? { remap?: boolean }
 function examples.skipCursor(motion, opts)
     mc.action(function(ctx)
@@ -285,22 +316,23 @@ function examples.skipCursor(motion, opts)
     end)
 end
 
---- @return SimplePos
+--- @return mc.SimplePos
 local function getMousePos()
     local mousePos = vim.fn.getmousepos()
     return {
         mousePos.line,
         mousePos.column,
         vim.o.virtualedit == "all"
-            --- @diagnostic disable
+            --- @diagnostic disable-next-line: undefined-field
             and mousePos.coladd
-            or nil
+            or nil,
     }
 end
 
 local mouseDragAdd = true
 local mouseDragPos = nil
 
+--- Use in a mouse mapping to add/remove cursors with mouse click.
 function examples.handleMouse()
     mc.action(function(ctx)
         mouseDragPos = getMousePos()
@@ -322,6 +354,7 @@ function examples.handleMouse()
     end)
 end
 
+--- Use in a mouse mapping to add/remove cursors with (vertical) mouse drag.
 function examples.handleMouseDrag()
     mc.action(function(ctx)
         if mouseDragPos == nil then
@@ -351,7 +384,6 @@ function examples.handleMouseDrag()
                     end
                 end
             else
-                local existingCursor = ctx:getCursorAtPos(pos)
                 if existingCursor then
                     existingCursor:delete()
                 end
@@ -360,17 +392,22 @@ function examples.handleMouseDrag()
     end)
 end
 
+--- Use in a mouse mapping to improve mouse support when dragging with a
+--- modifier after having already clicked without it.
 function examples.handleMouseRelease()
     mouseDragAdd = true
     mouseDragPos = nil
 end
 
+--- Restore cursors after they were cleared or after switching window.
 function examples.restoreCursors()
     mc.action(function(ctx)
         ctx:restore()
     end)
 end
 
+--- Locks the cursors from moving. This is useful for repositioning main
+--- cursor for adding more cursors.
 function examples.disableCursors()
     mc.action(function(ctx)
         local mainCursor = ctx:mainCursor()
@@ -380,6 +417,7 @@ function examples.disableCursors()
     end)
 end
 
+--- Unlocks disabled cursors, currently active cursors will be discarded.
 function examples.enableCursors()
     mc.action(function(ctx)
         local cursors = ctx:getCursors()
@@ -390,6 +428,8 @@ function examples.enableCursors()
     end)
 end
 
+--- Add/remove a cursor under the main cursor. This action disables all
+--- cursors. Use `mc.enableCursors()` to enable cursors again.
 function examples.toggleCursor()
     mc.action(function(ctx)
         ctx:setCursorsEnabled(false)
@@ -405,6 +445,7 @@ function examples.toggleCursor()
     end)
 end
 
+--- Clone every cursor and disable the originals.
 function examples.duplicateCursors()
     mc.action(function(ctx)
         ctx:forEachCursor(function(cursor)
@@ -414,6 +455,7 @@ function examples.duplicateCursors()
     end)
 end
 
+--- Create cursors for each line of every visual selections.
 function examples.visualToCursors()
     mc.action(function(ctx)
         ctx:forEachCursor(function(cursor)
@@ -425,6 +467,8 @@ function examples.visualToCursors()
     end)
 end
 
+--- Create a cursor for each line of every visual selections, and enter
+--- insert mode with `I`.
 function examples.insertVisual()
     local mode = vim.fn.mode()
     mc.action(function(ctx)
@@ -443,6 +487,8 @@ function examples.insertVisual()
     mc.feedkeys(mode == TERM_CODES.CTRL_V and "i" or "I")
 end
 
+--- Create a cursor for each line of every visual selections, and enter
+--- insert mode with `A`.
 function examples.appendVisual()
     local mode = vim.fn.mode()
     mc.action(function(ctx)
@@ -481,10 +527,12 @@ local function selectBoundaryCursor(direction)
     end)
 end
 
+--- Select the cursor closest to the start of the document.
 function examples.firstCursor()
     selectBoundaryCursor(-1)
 end
 
+--- Select the cursor closest to the end of the document.
 function examples.lastCursor()
     selectBoundaryCursor(1)
 end
@@ -498,13 +546,15 @@ local function selectRelativeCursor(direction, wrap)
     mc.action(function(ctx)
         local mainCursor = ctx:mainCursor()
         if ctx:numEnabledCursors() > 1 then
-            local cursor = ctx:seekCursor(mainCursor:getPos(), direction, wrap)
+            local cursor = ctx:seekCursor(
+                mainCursor:getPos(), direction, wrap)
             if cursor then
                 cursor:select()
             end
         elseif ctx:numCursors() > 1 then
             local opts = { disabledCursors = true }
-            local cursor = ctx:seekCursor(mainCursor:getPos(), direction, wrap, opts)
+            local cursor = ctx:seekCursor(
+                mainCursor:getPos(), direction, wrap, opts)
             if cursor then
                 cursor:select()
                 mainCursor:delete()
@@ -514,22 +564,26 @@ local function selectRelativeCursor(direction, wrap)
     end)
 end
 
+--- Make the next cursor the main cursor.
 --- @param wrap? boolean default true
 function examples.nextCursor(wrap)
     selectRelativeCursor(1, wrap)
 end
 
+--- Make the previous cursor the main cursor.
 --- @param wrap? boolean default true
 function examples.prevCursor(wrap)
     selectRelativeCursor(-1, wrap)
 end
 
+--- Delete the main cursor. The closest cursor becomes the new main cursor.
 function examples.deleteCursor()
     mc.action(function(ctx)
         ctx:mainCursor():delete()
     end)
 end
 
+--- Delete the cursor under the main cursor if any.
 function examples.deleteOverlappedCursor()
     mc.action(function(ctx)
         ctx:forEachCursor(function(cursor)
@@ -541,6 +595,9 @@ function examples.deleteOverlappedCursor()
     end)
 end
 
+--- Escape regex for search
+--- @param regex string
+--- @return string
 local function escapeRegex(regex)
     regex = vim.fn.substitute(regex, "\\", "\\\\\\\\", "g")
     regex = vim.fn.substitute(regex, "/", "\\\\/", "g")
@@ -548,6 +605,9 @@ local function escapeRegex(regex)
     return regex
 end
 
+--- Returns whether the string is considered a keyword
+--- @param s string
+--- @return boolean
 local function isKeyword(s)
     return vim.fn.match(s, '\\v^\\k+$') >= 0
 end
@@ -556,6 +616,7 @@ end
 --- @param add boolean
 local function matchAddCursor(direction, add)
     mc.action(function(ctx)
+        local count = vim.v.count1
         local mainCursor = ctx:mainCursor()
         local cursorChar
         local cursorWord
@@ -572,40 +633,48 @@ local function matchAddCursor(direction, add)
                 mainCursor:feedkeys('"_yiw')
             end
         end
-        addCursor(ctx, function(cursor)
-            local regex
-            local hasSelection = cursor:hasSelection()
-            if hasSelection then
-                regex = "\\C\\V" .. escapeRegex(table.concat(cursor:getVisualLines(), "\n"))
-                if cursor:mode() == "V" or cursor:mode() == "S" then
-                    cursor:feedkeys(cursor:atVisualStart() and "0" or "o0")
-                elseif not cursor:atVisualStart() then
-                    cursor:feedkeys("o")
-                end
-            else
-                if cursorChar == "" then
-                    regex = "\\v^$"
-                elseif searchWord then
-                    regex = "\\v<\\C\\V" .. escapeRegex(cursorWord) .. "\\v>"
+        for _ = 1, count do
+            addCursor(ctx, function(cursor)
+                local regex
+                local hasSelection = cursor:hasSelection()
+                if hasSelection then
+                    regex = "\\C\\V" .. escapeRegex(
+                        table.concat(cursor:getVisualLines(), "\n"))
+                    if vim.o.selection == "exclusive"  then
+                        regex = regex .. "\\v(.*\\n)@="
+                    end
+                    if cursor:mode() == "V" or cursor:mode() == "S" then
+                        cursor:feedkeys(cursor:atVisualStart() and "0" or "o0")
+                    elseif not cursor:atVisualStart() then
+                        cursor:feedkeys("o")
+                    end
                 else
-                    regex = "\\C\\V" .. escapeRegex(cursorChar)
+                    if cursorChar == "" then
+                        regex = "\\v^$"
+                    elseif searchWord then
+                        regex = "\\v<\\C\\V" .. escapeRegex(cursorWord) .. "\\v>"
+                    else
+                        regex = "\\C\\V" .. escapeRegex(cursorChar)
+                    end
                 end
-            end
-            cursor:perform(function()
-                vim.fn.search(regex, (direction == -1 and "b" or ""))
-            end)
-            if hasSelection then
-                cursor:feedkeys(TERM_CODES.ESC)
-            end
-        end, { addCursor = add })
+                cursor:perform(function()
+                    vim.fn.search(regex, (direction == -1 and "b" or ""))
+                end)
+                if hasSelection then
+                    cursor:feedkeys(TERM_CODES.ESC)
+                end
+            end, { addCursor = add })
+        end
     end)
 end
 
+--- Add a new cursor by matching the current word/selection.
 --- @param direction? -1 | 1
 function examples.matchAddCursor(direction)
     matchAddCursor(direction, true)
 end
 
+--- Move only the main cursor by matching the current word/selection.
 --- @param direction? -1 | 1
 function examples.matchSkipCursor(direction)
     matchAddCursor(direction, false)
@@ -619,132 +688,156 @@ local function searchAddCursor(direction, add)
         return
     end
     mc.action(function(ctx)
-        local mainCursor = ctx:mainCursor()
-        if mainCursor:hasSelection() then
-            mainCursor:feedkeys(
-                (mainCursor:atVisualStart() and "" or "o")
-                .. TERM_CODES.ESC
-            )
+        for _ = 1, vim.v.count1 do
+            local mainCursor = ctx:mainCursor()
+            if mainCursor:hasSelection() then
+                mainCursor:feedkeys(
+                    (mainCursor:atVisualStart() and "" or "o")
+                    .. TERM_CODES.ESC
+                )
+            end
+            addCursor(ctx, function(cursor)
+                cursor:perform(function()
+                    vim.fn.search(regex, (direction == -1 and "b" or ""))
+                end)
+            end, { addCursor = add })
         end
-        addCursor(ctx, function(cursor)
-            cursor:perform(function()
-                vim.fn.search(regex, (direction == -1 and "b" or ""))
-            end)
-        end, { addCursor = add })
     end)
 end
 
+--- Add a cursor and jump to the next/previous search result.
 --- @param direction? -1 | 1
 function examples.searchAddCursor(direction)
     searchAddCursor(direction, true)
 end
 
+--- Jump to the next/previous search result without adding a cursor.
 --- @param direction? -1 | 1
 function examples.searchSkipCursor(direction)
     searchAddCursor(direction, false)
 end
 
---- @param ctx CursorContext
+--- @param ctx mc.CursorContext
 --- @param regex string
 local function regexAddAllCursors(ctx, regex)
     local mainCursor = ctx:mainCursor()
-    if mainCursor:hasSelection() then
-        mainCursor:feedkeys(TERM_CODES.ESC)
-    end
-    local positions = {}
-    local nPositions = 0
-    while true do
-        mainCursor:perform(function()
-            vim.fn.search(regex)
-        end)
-        positions[nPositions + 1] = mainCursor:getPos()
-        nPositions = nPositions + 1
-        if nPositions > 1
-            and positions[1][1] == positions[nPositions][1]
-            and positions[1][2] == positions[nPositions][2]
-        then
-            break
-        end
-    end
-    for _, position in ipairs(positions) do
-        mainCursor:clone():setPos(position)
-    end
+    mainCursor:setMode("n")
+    vim.fn.search(regex)
+    local firstPos = vim.fn.getcurpos()
+    local pos = firstPos
+    repeat
+        mainCursor:clone():setPos({ pos[2], pos[3] })
+        vim.fn.search(regex)
+        pos = vim.fn.getcurpos()
+    until firstPos[2] == pos[2] and firstPos[3] == pos[3]
     mainCursor:delete()
 end
 
+--- Add a cursor for every match of the word/selection under the cursor.
 function examples.matchAllAddCursors()
     mc.action(function(ctx)
         local mainCursor = ctx:mainCursor()
         local regex = mainCursor:hasSelection()
-            and ("\\C\\V" .. escapeRegex(table.concat(mainCursor:getVisualLines(), "\n")))
-            or ("\\v<\\C\\V" .. escapeRegex(mainCursor:getCursorWord()) .. "\\v>")
+            and ("\\C\\V" .. escapeRegex(
+                table.concat(mainCursor:getVisualLines(), "\n")))
+            or ("\\v<\\C\\V" .. escapeRegex(
+                mainCursor:getCursorWord()) .. "\\v>")
         regexAddAllCursors(ctx, regex)
     end)
 end
 
+--- Add a cursor to every search result in the buffer.
 function examples.searchAllAddCursors()
     local regex = vim.fn.getreg("/")
     if not regex or regex == "" then
         return
     end
     mc.action(function(ctx)
-        if ctx:mainCursor():hasSelection() then
-            ctx:mainCursor():feedkeys(TERM_CODES.ESC)
-        end
         regexAddAllCursors(ctx, regex)
     end)
 end
 
 --- @param direction? -1 | 1
 --- @param add boolean
-local function lineAddCursor(direction, add)
+--- @param opts? { skipEmpty?: boolean }
+local function lineAddCursor(direction, add, opts)
+    opts = vim.tbl_extend("keep", opts or {}, { skipEmpty = true })
     mc.action(function(ctx)
-        local mainCursor = ctx:mainCursor()
-        local line, _, offset = table.unpack(mainCursor:getPos())
-        if offset > 0 then
-            addCursor(ctx, direction == -1 and "k" or "j", {
-                addCursor = add,
-                remap = false,
-            })
-            return
-        end
-        local virtCol = vim.fn.virtcol(".")
-        local lastLine = vim.fn.line("$")
-        local found = false
-        while true do
-            line = line + direction
-            if line < 1 or line > lastLine then
-                break
+        for _ = 1, vim.v.count1 do
+            local _, line, _, offset, curswant =
+                table.unpack(vim.fn.getcurpos())
+            if offset > 0 then
+                addCursor(ctx, direction == -1 and "k" or "j", {
+                    addCursor = add,
+                    remap = false,
+                })
+                return
             end
-            local maxCol = vim.fn.virtcol({ line, "$" })
-            if virtCol == 1 or maxCol > virtCol then
-                found = true
-                break
+            -- local virtCol = vim.fn.virtcol(".")
+            local virtCol = vim.fn.virtcol({
+                vim.fn.line("."),
+                vim.fn.col(".") - 1
+            }) + 1
+            local lastLine = vim.fn.line("$")
+            local found = false
+            if opts.skipEmpty then
+                while true do
+                    line = line + direction
+                    if line < 1 or line > lastLine then
+                        break
+                    end
+                    local maxCol = vim.fn.virtcol({ line, "$" })
+                    if virtCol == 1 or maxCol > virtCol then
+                        found = true
+                        break
+                    end
+                end
+            else
+                line = line + direction
+                found = line >= 1 and line <= lastLine
             end
+            if not found then
+                return
+            end
+            if ctx:numEnabledCursors() <= 1 then
+                curswant = virtCol
+            end
+            addCursor(ctx, function(cursor)
+                local col = vim.fn.virtcol2col(0, line, curswant)
+                cursor:perform(function()
+                    vim.fn.setpos(".", {
+                        0,
+                        line,
+                        col,
+                        offset,
+                        curswant
+                    })
+                end)
+            end, { addCursor = add })
         end
-        if not found then
-            return
-        end
-        addCursor(ctx, function(cursor)
-            cursor:setPos({
-                line,
-                vim.fn.virtcol2col(0, line, virtCol),
-                offset,
-            })
-        end, { addCursor = add })
     end)
 end
 
+--- Add a cursor above or below the main cursor, skipping empty lines,
+--- specified by `direction`.
 --- @param direction? -1 | 1
-function examples.lineAddCursor(direction)
-    lineAddCursor(direction, true)
+--- @param opts? { skipEmpty?: boolean }
+function examples.lineAddCursor(direction, opts)
+    lineAddCursor(direction, true, opts)
 end
 
+--- Move only the main cursor up or down a line, skipping empty lines,
+--- specified by `direction`.
 --- @param direction? -1 | 1
-function examples.lineSkipCursor(direction)
-    lineAddCursor(direction, false)
+--- @param opts? { skipEmpty?: boolean }
+function examples.lineSkipCursor(direction, opts)
+    lineAddCursor(direction, false, opts)
 end
 
+--- Takes a motion and adds a cursor for every lines.
+---
+--- For example, if it is mapped to `ga`, then typing `gaip` will add a
+--- cursor for every line in the current paragraph.
 function examples.addCursorOperator()
     local mode = vim.fn.mode()
     local curPos = vim.fn.getpos(".")
@@ -797,12 +890,16 @@ function examples.addCursorOperator()
     vim.fn.feedkeys("g@", "nt")
 end
 
+--- @param pattern? string
+--- @param range mc.Range
+--- @param selection string[] Lines
+--- @param visual boolean
 local function matchCursorsRange(pattern, range, selection, visual)
     mc.action(function(ctx)
         if not pattern or pattern == "" then
             return
         end
-        --- @type Cursor[]
+        --- @type mc.Cursor[]
         local newCursors = {}
         ctx:forEachCursor(function(cursor)
             if cursor:hasSelection() then
@@ -842,41 +939,63 @@ end
 
 --- @param direction? -1 | 1
 --- @param add boolean
---- @param opts? vim.diagnostic.GotoOpts
+--- @param opts? vim.diagnostic.JumpOpts
 local function diagnosticAddCursor(direction, add, opts)
+    opts = opts or {}
     mc.action(function(ctx)
-        local mainCursor = ctx:mainCursor()
-        local d = direction == 1 and vim.diagnostic.get_next(opts) or vim.diagnostic.get_prev(opts)
-        if d == nil then
-            return
+        for _ = 1, vim.v.count1 do
+            local pos = ctx:mainCursor():getPos()
+            opts.pos = { pos[1], pos[2] - 1 }
+            local d = direction == 1 and
+                vim.diagnostic.get_next(opts)
+                or vim.diagnostic.get_prev(opts)
+            if d == nil then
+                return
+            end
+            addCursor(ctx, function(cursor)
+                cursor:setPos({ d.lnum + 1, d.col + 1 })
+            end, { addCursor = add })
         end
-        addCursor(ctx, function(cursor)
-            cursor:setPos({ d.lnum + 1, d.col + 1 })
-        end, { addCursor = add })
     end)
 end
 
+--- Add a cursor at the next diagnostic found in `direction`.
 --- @param direction? -1 | 1
---- @param opts? vim.diagnostic.GotoOpts
+--- @param opts? vim.diagnostic.JumpOpts
 function examples.diagnosticAddCursor(direction, opts)
     diagnosticAddCursor(direction, true, opts)
 end
 
+--- Skips to the next diagnostic found in `direction`.
 --- @param direction? -1 | 1
---- @param opts? vim.diagnostic.GotoOpts
+--- @param opts? vim.diagnostic.JumpOpts
 function examples.diagnosticSkipCursor(direction, opts)
     diagnosticAddCursor(direction, false, opts)
 end
 
+--- Adds a cursor for every diagnostic found in the range
+--- provided by a motion.
 --- @param opts? vim.diagnostic.GetOpts
 function examples.diagnosticMatchCursors(opts)
+    --- @param mode string Visual mode
+    --- @return mc.Range
     local function getRange(mode)
         local s = vim.api.nvim_buf_get_mark(0, "[")
         local e = vim.api.nvim_buf_get_mark(0, "]")
         if mode == "char" then
-            return { startRow = s[1], startCol = s[2], endRow = e[1], endCol = e[2] }
+            return {
+                startRow = s[1],
+                startCol = s[2],
+                endRow = e[1],
+                endCol = e[2],
+            }
         else
-            return { startRow = s[1], startCol = 0, endRow = e[1], endCol = math.huge }
+            return {
+                startRow = s[1],
+                startCol = 0,
+                endRow = e[1],
+                endCol = math.huge,
+            }
         end
     end
 
@@ -898,15 +1017,25 @@ function examples.diagnosticMatchCursors(opts)
     local mode = vim.fn.mode()
     if mode == "v" or mode == "V" or mode == "\22" then
         mc.action(function(ctx)
-            --- @type Cursor[]
+            --- @type mc.Cursor[]
             ctx:forEachCursor(function(cursor)
                 if cursor:hasSelection() then
                     local vs, ve = cursor:getVisual()
                     local range
                     if mode == "V" then
-                        range = { startRow = vs[1], startCol = 0, endRow = ve[1], endCol = math.huge }
+                        range = {
+                            startRow = vs[1],
+                            startCol = 0,
+                            endRow = ve[1],
+                            endCol = math.huge,
+                        }
                     else
-                        range = { startRow = vs[1], startCol = vs[2] - 1, endRow = ve[1], endCol = ve[2] - 1 }
+                        range = {
+                            startRow = vs[1],
+                            startCol = vs[2] - 1,
+                            endRow = ve[1],
+                            endCol = ve[2] - 1,
+                        }
                     end
                     for _, d in ipairs(diagnostics) do
                         -- diagnostic is 0-based line and col
@@ -946,7 +1075,7 @@ function examples.diagnosticMatchCursors(opts)
                 -- example flash.nvim treesitter labels (it itself can't dot
                 -- repeat), but most common cases would work.
                 for _, cursor in ipairs(otherCursors) do
-                    setOpfunc(function(mode)
+                    setOpfunc(function()
                         local range = getRange(mode)
                         for _, d in ipairs(diagnostics) do
                             -- diagnostic is 0-based line and col
@@ -970,12 +1099,27 @@ function examples.diagnosticMatchCursors(opts)
     end
 end
 
--- Works both in visual and normal mode, if called from visual mode, pattern
--- and motion are ignored, wordBoundary defaults to false, the selected range
--- will be used to determine the pattern. You can either pass a motion or a
--- pattern in normal mode, which will be used to create cursors within the
--- range without you explicitly type the motion (e.g. iw) to capture the pattern.
----@param opts? { pattern: string, motion: string, visual: boolean, wordBoundary: boolean }
+
+--- @class mc.OperatorOpts
+--- @field pattern string
+--- @field motion string
+--- @field visual boolean
+--- @field wordBoundary boolean
+
+--- Adds a cursor for every match found in a region. The text to match is
+--- given by a motion, and the region is given by a second motion.
+---
+--- For example, if mapped to `<leader>m` then `<leader>miwap` will find every
+--- match within the paragraph of the text contained within `iw`.
+--- If called from visual mode, the selection becomes the first motion's
+--- target text.
+--- Works both in visual and normal mode, if called from visual mode, pattern
+--- and motion are ignored, wordBoundary defaults to false, the selected range
+--- will be used to determine the pattern. You can either pass a motion or a
+--- pattern in normal mode, which will be used to create cursors within the
+--- range without you explicitly type the motion (e.g. iw) to capture the
+--- pattern.
+--- @param opts? mc.OperatorOpts
 function examples.operator(opts)
     local function is_visual(mode)
         return mode == "v" or mode == "V" or mode == "\22"
@@ -999,7 +1143,12 @@ function examples.operator(opts)
     local function getRange(visual)
         local s = vim.api.nvim_buf_get_mark(0, visual and "<" or "[")
         local e = vim.api.nvim_buf_get_mark(0, visual and ">" or "]")
-        return { startRow = s[1], startCol = s[2], endRow = e[1], endCol = e[2] }
+        return {
+            startRow = s[1],
+            startCol = s[2],
+            endRow = e[1],
+            endCol = e[2],
+        }
     end
 
     local function getSelection(range, vmode)
@@ -1032,21 +1181,25 @@ function examples.operator(opts)
     setOpfunc(function(opMode)
         -- First stage to get pattern.
         if vMode ~= nil then
-            -- If called from visual mode, opts.pattern and opts.motion are ignored,
-            -- we get pattern from previous visual selection.
+            -- If called from visual mode, opts.pattern and opts.motion are
+            -- ignored, we get pattern from previous visual selection.
             state.pattern = string.format(
                 state.wordBoundary and "\\M\\<%s\\>" or "\\M%s",
                 getSelection(getRange(true), vMode)[1]
             )
         elseif state.pattern == "" then
-            -- If user doesn't provide a pattern, we get pattern specified by '[
-            -- and '] marker.
+            -- If user doesn't provide a pattern, we get pattern specified by
+            -- '[ and '] marker.
             state.pattern = string.format(
                 state.wordBoundary and "\\<%s\\>" or "%s",
                 getSelection(getRange(false), opMode)[1]
             )
         end
-        local id = vim.fn.matchadd("MultiCursorMatchPreview", state.pattern, 2)
+        local id = vim.fn.matchadd(
+            "MultiCursorMatchPreview",
+            state.pattern,
+            2
+        )
         vim.schedule(function()
             -- Press any key will clear the match.
             vim.api.nvim_create_autocmd("SafeState", {
@@ -1058,7 +1211,8 @@ function examples.operator(opts)
         end)
         setOpfunc(function(mode)
             -- Second stage to get range, only '[ and '] markers make sense
-            -- here, we get selection by mode (one of "char", "line", or "block").
+            -- here, we get selection by mode (one of "char", "line",
+            -- or "block").
             local range = getRange(false)
             if mode ~= "char" then
                 range.startCol = 0
@@ -1077,7 +1231,8 @@ function examples.operator(opts)
     if state.pattern ~= "" or vMode ~= nil then
         vim.api.nvim_feedkeys(string.format("g@l"), "ni", false)
     else
-        vim.api.nvim_feedkeys(string.format("g@%s", state.motion or ""), "mi", false)
+        vim.api.nvim_feedkeys(string.format(
+            "g@%s", state.motion or ""), "mi", false)
     end
 end
 
@@ -1120,9 +1275,14 @@ local function sequenceIncrement(direction)
     end
 end
 
+--- Behaves like |g_CTRL-a|, except all lines of all cursors are treated
+--- as one sequence.
 function examples.sequenceIncrement()
     sequenceIncrement(1)
 end
+
+--- Behaves like |g_CTRL-x|, except all lines of all cursors are treated
+--- as one sequence.
 function examples.sequenceDecrement()
     sequenceIncrement(-1)
 end

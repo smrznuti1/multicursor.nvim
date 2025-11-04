@@ -33,7 +33,7 @@ local SPECIAL_NORMAL_KEYS = {
 --- @field private _wasMode string
 --- @field private _fromSelectMode boolean
 --- @field private _modeChangeCallbacks? function[]
---- @field private _keymapLayerCallbacks? KeymapSetCallback[]
+--- @field private _keymapLayerCallbacks? mc.KeymapSetterFunc[]
 local InputManager = {}
 
 --- @param nsid number
@@ -49,6 +49,8 @@ function InputManager:setup(nsid)
     self._keymapLayerCallbacks = {}
 
     local originalGetChar = vim.fn.getchar
+
+    --- @diagnostic disable-next-line: duplicate-set-field
     function vim.fn.getchar(...)
         if ({...})[1] == 1 and cursorManager:hasCursors() then
             return 0
@@ -94,12 +96,12 @@ function InputManager:setup(nsid)
     )
 end
 
---- @param callback fun(set: KeymapSetCallback)
+--- @param callback fun(set: mc.KeymapSetterFunc)
 function InputManager:addKeymapLayer(callback)
     table.insert(self._keymapLayerCallbacks, callback)
 end
 
---- @param callback fun(set: KeymapSetCallback)
+--- @param callback fun(set: mc.KeymapSetterFunc)
 function InputManager:removeKeymapLayer(callback)
     self._keymapLayerCallbacks =
         tbl.filter(self._keymapLayerCallbacks, function(cb)
@@ -107,7 +109,7 @@ function InputManager:removeKeymapLayer(callback)
         end)
 end
 
---- @param callback function(cursor: Cursor, from: string, to: string)
+--- @param callback fun(cursor: mc.Cursor, from: string, to: string)
 function InputManager:onModeChanged(callback)
     if not self._modeChangeCallbacks then
         self._modeChangeCallbacks = {}
@@ -115,20 +117,30 @@ function InputManager:onModeChanged(callback)
     self._modeChangeCallbacks[#self._modeChangeCallbacks + 1] = callback
 end
 
---- @class SafeStateInfo
+--- @class mc.SafeStateInfo
 --- @field wasMode string
 
---- @param callback function(info: SafeStateInfo)
-function InputManager:onSafeState(callback)
+--- @param callback fun(info: mc.SafeStateInfo)
+--- @param opts? { once?: boolean }
+function InputManager:onSafeState(callback, opts)
     if not self._safeStateCallbacks then
         self._safeStateCallbacks = {}
+    end
+    if opts and opts.once then
+        local wrapped = callback
+        callback = function(info)
+            wrapped(info)
+            tbl.remove(self._safeStateCallbacks, callback)
+        end
     end
     self._safeStateCallbacks[#self._safeStateCallbacks + 1] = callback
 end
 
---- @param callback function
+--- Call given callback, handling internal state
+--- @param callback fun()
 function InputManager:performAction(callback)
     if not self._applying then
+        self:_disableTogglableAdapters()
         self._applying = true
         local success, err = pcall(callback)
         self._applying = false
@@ -138,6 +150,7 @@ function InputManager:performAction(callback)
     end
 end
 
+--- Reset internal state
 function InputManager:clear()
     self._keys = ""
     self._typed = ""
@@ -166,14 +179,19 @@ function InputManager:_handleExitInsertMode(mode, wasFromSelectMode)
             if self._modeChangeCallbacks and self._wasMode ~= mode then
                 local changePos = vim.fn.getpos("'[")
                 self:_emitModeChanged(ctx:mainCursor(), self._wasMode, mode)
-                ctx:mainCursor():setRedoChangePos({changePos[2], changePos[3]})
+                ctx:mainCursor():setRedoChangePos(
+                    {changePos[2], changePos[3]})
             end
             ctx:forEachCursor(function(cursor)
                 cursor:perform(function()
-                    if not wasFromSelectMode then
-                        feedkeysManager.nvim_feedkeys(self._typed, "", false)
+                    if cursor:mode() == "n" then
+                        feedkeysManager.nvim_feedkeys(".", "nx", false)
+                    else
+                        if not wasFromSelectMode then
+                            feedkeysManager.nvim_feedkeys(self._typed, "", false)
+                        end
+                        feedkeysManager.nvim_feedkeys(reg, "nx", false)
                     end
-                    feedkeysManager.nvim_feedkeys(reg, "nx", false)
                 end)
                 if self._modeChangeCallbacks and self._wasMode ~= mode then
                     self:_emitModeChanged(cursor, self._wasMode, mode)
@@ -217,7 +235,11 @@ function InputManager:_handleSpecialKey(specialKey)
 end
 
 local CLEARABLE_ADAPTERS = {
-    ["flash.plugins.char"] = function(m) m.state:hide() end,
+    ["flash.plugins.char"] = function(m)
+        if m.state then
+            m.state:hide()
+        end
+    end,
 }
 
 local TOGGLABLE_ADAPTERS = {
@@ -248,6 +270,38 @@ local TOGGLABLE_ADAPTERS = {
         end,
     },
 }
+
+function InputManager:_disableTogglableAdapters()
+    for k, v in pairs(TOGGLABLE_ADAPTERS) do
+        if v.state.enabled == nil then
+            v.state.enabled = false
+            if package.loaded[k] then
+                local msuccess, m = pcall(require, k)
+                if msuccess then
+                    local success, enabled = pcall(v.enabled, m)
+                    v.state.enabled = success and (enabled or false)
+                    if v.state.enabled then
+                        v.setEnabled(m, false)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function InputManager:_enableTogglableAdapters()
+    for k, v in pairs(TOGGLABLE_ADAPTERS) do
+        if v.state.enabled then
+            if package.loaded[k] then
+                local msuccess, m = pcall(require, k)
+                if msuccess then
+                    v.setEnabled(m, true)
+                end
+            end
+        end
+        v.state.enabled = nil
+    end
+end
 
 function InputManager:_handleKeys(mode)
     local handled = false
@@ -310,41 +364,18 @@ function InputManager:_onSafeState()
     end
     if cursorManager:hasCursors() then
         keymapManager:apply(vim.fn.bufnr(), self._keymapLayerCallbacks)
-        for k, v in pairs(TOGGLABLE_ADAPTERS) do
-            if v.state.enabled == nil then
-                v.state.enabled = false
-                if package.loaded[k] then
-                    local msuccess, m = pcall(require, k)
-                    if msuccess then
-                        local success, enabled = pcall(v.enabled, m)
-                        v.state.enabled = success and (enabled or false)
-                        if v.state.enabled then
-                            v.setEnabled(m, false)
-                        end
-                    end
-                end
-            end
-        end
+        self:_disableTogglableAdapters()
     else
         keymapManager:restore()
-        for k, v in pairs(TOGGLABLE_ADAPTERS) do
-            if v.state.enabled then
-                if package.loaded[k] then
-                    local msuccess, m = pcall(require, k)
-                    if msuccess then
-                        v.setEnabled(m, true)
-                    end
-                end
-            end
-            v.state.enabled = nil
-        end
+        self:_enableTogglableAdapters()
     end
     local mode = vim.fn.mode()
     if isInsertOrReplaceMode(mode) then
         if not isInsertOrReplaceMode(self._wasMode) then
             self._insertModeStartPos = vim.fn.getpos(".")
             if self._fromSelectMode then
-                self._insertModeStartPos[3] = math.max(1, self._insertModeStartPos[3] - 1)
+                self._insertModeStartPos[3] = math.max(
+                    1, self._insertModeStartPos[3] - 1)
             end
         end
         self._wasMode = mode
@@ -365,7 +396,8 @@ function InputManager:_onSafeState()
     if self._cmdType == ":" then
         self:_handleLeaveCommandlineMode()
     elseif self._cmdType
-        and string.sub(self._typed, #self._typed, #self._typed) == TERM_CODES.ESC
+        and string.sub(self._typed, #self._typed, #self._typed)
+            == TERM_CODES.ESC
     then
         -- for some reason escape doesn't cancel search when feedkeys
     elseif self._didUndo then
@@ -376,6 +408,8 @@ function InputManager:_onSafeState()
         self:_handleSnippet(wasFromSelectMode)
     elseif isInsertOrReplaceMode(self._wasMode) then
         self:_handleExitInsertMode(mode, wasFromSelectMode)
+    elseif vim.startswith(self._keys, "q") then
+        -- ignore macro start/end recording keys
     else
         local command = string.match(self._keys, "%d*(.*)")
         if self._wasMode ~= "c" and
