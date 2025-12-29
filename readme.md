@@ -120,7 +120,8 @@ you can pick which you find useful.
 
 ```lua
 -- Pressing `gaip` will add a cursor on each line of a paragraph.
-set("n", "ga", mc.addCursorOperator)
+-- Can also be used to add cursor for each line of visual selection.
+set({"n", "x"}, "ga", mc.addCursorOperator)
 
 -- Clone every cursor and disable the originals.
 set({"n", "x"}, "<leader><c-q>", mc.duplicateCursors)
@@ -149,7 +150,7 @@ set("x", "<leader>T", function() mc.transposeCursors(-1) end)
 set("x", "I", mc.insertVisual)
 set("x", "A", mc.appendVisual)
 
--- Increment/decrement sequences, treaing all cursors as one sequence.
+-- Increment/decrement sequences, treating all cursors as one sequence.
 set({"n", "x"}, "g<c-a>", mc.sequenceIncrement)
 set({"n", "x"}, "g<c-x>", mc.sequenceDecrement)
 

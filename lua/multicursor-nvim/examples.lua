@@ -838,9 +838,20 @@ end
 ---
 --- For example, if it is mapped to `ga`, then typing `gaip` will add a
 --- cursor for every line in the current paragraph.
-function examples.addCursorOperator()
+--- @param placement? "START_OF_LINE" | "START_OF_SELECTION" | "CURSOR"
+function examples.addCursorOperator(placement)
     local mode = vim.fn.mode()
+    if not placement then
+        if mode == TERM_CODES.CTRL_V or mode == TERM_CODES.CTRL_S then
+            placement = "START_OF_SELECTION"
+        elseif mode == "n" then
+            placement = "CURSOR"
+        else
+            placement = "START_OF_LINE"
+        end
+    end
     local curPos = vim.fn.getpos(".")
+    local vPos = vim.fn.getpos("v")
     local fromVisual = mode == "v"
         or mode == "V"
         or mode == TERM_CODES.CTRL_V
@@ -849,7 +860,6 @@ function examples.addCursorOperator()
         or mode == TERM_CODES.CTRL_S
     local atVisualStart
     if fromVisual then
-        local vPos = vim.fn.getpos("v")
         atVisualStart = curPos[2] < vPos[2]
             or curPos[2] == vPos[2]
             and (curPos[3] < vPos[3]
@@ -863,12 +873,19 @@ function examples.addCursorOperator()
             local firstCursor
             local changeStart = vim.fn.getpos("'[")
             local changeEnd = vim.fn.getpos("']")
+            local col = 1
+            if placement == "CURSOR" then
+                col = curPos[3]
+            elseif placement == "START_OF_SELECTION" then
+                if mode == TERM_CODES.CTRL_V or mode == TERM_CODES.CTRL_S then
+                    col = math.min(curPos[3], vPos[3])
+                end
+            end
             for i = changeStart[2], changeEnd[2] do
-                local col = math.min(
-                    curPos[3],
-                    vim.fn.col({ i, "$" }) - 1
-                )
-                lastCursor = mainCursor:clone():setPos({i, col})
+                lastCursor = mainCursor:clone():setPos({
+                    i,
+                    math.min(col, vim.fn.col({ i, "$" }))
+                })
                 if not firstCursor then
                     firstCursor = lastCursor
                 end

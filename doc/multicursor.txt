@@ -540,14 +540,19 @@ mc.sequenceDecrement()                         *multicursor-sequenceDecrement*
         vim.keymap.set({"x", "n"}, "g<c-x>", mc.sequenceDecrement)
 <
 
-mc.addCursorOperator()                         *multicursor-addCursorOperator*
+mc.addCursorOperator(placement?)               *multicursor-addCursorOperator*
     Takes a motion and adds a cursor for every lines.
 
     For example, if it is mapped to `ga`, then typing `gaip` will add a cursor
     for every line in the current paragraph.
 
+    Parameters: ~
+      • {placement?} (`"START_OF_SELECTION" | "START_OF_LINE" | "CURSOR"`)
+        Where the created cursors should be placed. If omitted, the best
+        placement will be chosen depending on which mode is used.
+
     Usage example: >lua
-        vim.keymap.set("n", "ga", mc.addCursorOperator)
+        vim.keymap.set({"n", "x"}, "ga", mc.addCursorOperator)
 <
 
 mc.operator(opts?)                                      *multicursor-operator*
