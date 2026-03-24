@@ -804,6 +804,7 @@ end
 
 --- @param cursor mc.Cursor
 local function cursorWrite(cursor)
+    cursor._register.points_to = nil
     vim.fn.setreg("", cursor._register)
     vim.fn.setreg("/", cursor._search)
     local mode = vim.fn.mode()
@@ -2360,6 +2361,7 @@ function CursorManager:action(callback, opts)
                 end
                 newCursor._register = oldCursor._register
             end
+            state.mainCursor._register.points_to = nil
             vim.fn.setreg("", state.mainCursor._register)
         end
     end
